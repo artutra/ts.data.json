@@ -1,3 +1,5 @@
+> INFO: This repo is just a copy of https://travis-ci.org/joanllenas/ts.data.json with a diferent name. The "ts.data.json" name cause bugs on metro bundler of react-native
+
 # JsonDecoder
 
 [![Build Status](https://travis-ci.org/joanllenas/ts.data.json.svg?branch=master)](https://travis-ci.org/joanllenas/ts.data.json)
