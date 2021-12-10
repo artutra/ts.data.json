@@ -1,4 +1,8 @@
-import { Result, Ok, ok, err } from './result';
+import { Result, ok, err } from './result';
+
+export type FromDecoder<Decoder> = Decoder extends JsonDecoder.Decoder<infer T>
+  ? T
+  : never;
 
 export namespace JsonDecoder {
   export class Decoder<a> {
@@ -14,15 +18,12 @@ export namespace JsonDecoder {
 
     /**
      * Decodes a JSON object of type <a> and calls onOk() on success or onErr() on failure, both return <b>
-     * @param json The JSON object to decode
+     *
      * @param onOk function called when the decoder succeeds
      * @param onErr function called when the decoder fails
+     * @param json The JSON object to decode
      */
-    onDecode<b>(
-      json: any,
-      onOk: (result: a) => b,
-      onErr: (error: string) => b
-    ): b {
+    fold<b>(onOk: (result: a) => b, onErr: (error: string) => b, json: any): b {
       const result = this.decode(json);
       if (result.isOk()) {
         return onOk(result.value);
@@ -35,8 +36,8 @@ export namespace JsonDecoder {
      * Decodes a JSON object of type <a> and returns a Promise<a>
      * @param json The JSON object to decode
      */
-    decodePromise<b>(json: any): Promise<a> {
-      return new Promise<a>((resolve, reject) => {
+    decodeToPromise(json: any): Promise<a> {
+      return new Promise((resolve, reject) => {
         const result = this.decode(json);
         if (result.isOk()) {
           return resolve(result.value);
@@ -47,7 +48,7 @@ export namespace JsonDecoder {
     }
 
     /**
-     * Chains decoder result transformations
+     * If the decoder has succeeded, transforms the decoded value into something else
      * @param fn The transformation function
      */
     map<b>(fn: (value: a) => b): Decoder<b> {
@@ -62,10 +63,26 @@ export namespace JsonDecoder {
     }
 
     /**
+     * TODO: Add documentation in the readme
+     * If the decoder has failed, transforms the error into an Ok value
+     * @param fn The transformation function
+     */
+    mapError<b>(fn: (error: string) => b): Decoder<a | b> {
+      return new Decoder<a | b>((json: any) => {
+        const result = this.decodeFn(json);
+        if (result.isOk()) {
+          return ok<a>(result.value);
+        } else {
+          return ok<b>(fn(result.error));
+        }
+      });
+    }
+
+    /**
      * Chains decoders
      * @param fn Function that returns a new decoder
      */
-    then<b>(fn: (value: a) => Decoder<b>): Decoder<b> {
+    chain<b>(fn: (value: a) => Decoder<b>): Decoder<b> {
       return new Decoder<b>((json: any) => {
         const result = this.decodeFn(json);
         if (result.isOk()) {
@@ -118,6 +135,25 @@ export namespace JsonDecoder {
       return err<boolean>($JsonDecoderErrors.primitiveError(json, 'boolean'));
     }
   });
+
+  /**
+   * Decode for `enumeration`.
+   *
+   * @param enumObj The enum object to use for decoding. Must not be a const enum.
+   * @param decoderName How to display the name of the object being decoded in errors.
+   */
+  export function enumeration<e>(
+    enumObj: object,
+    decoderName: string
+  ): Decoder<e> {
+    return new Decoder<e>((json: any) => {
+      const enumValue = Object.values(enumObj).find((x: any) => x === json);
+      if (enumValue) {
+        return ok<e>(enumValue);
+      }
+      return err<e>($JsonDecoderErrors.enumValueError(decoderName, json));
+    });
+  }
 
   export type DecoderObject<a> = { [p in keyof Required<a>]: Decoder<a[p]> };
   export type DecoderObjectKeyMap<a> = { [p in keyof a]?: string };
@@ -232,7 +268,6 @@ export namespace JsonDecoder {
 
   /**
    * Tries to decode with `decoder` and returns `defaultValue` on failure.
-   * (It was called maybe() before)
    *
    * @param defaultValue The default value returned in case of decoding failure.
    * @param decoder The actual decoder to use.
@@ -306,51 +341,6 @@ export namespace JsonDecoder {
     });
   }
 
-  type SubtractOne<T extends number> = [
-    -1,
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    12,
-    13,
-    14,
-    15,
-    16,
-    17,
-    18,
-    19,
-    20,
-    21,
-    22,
-    23,
-    24,
-    25,
-    26,
-    27,
-    28,
-    29,
-    30
-  ][T];
-
-  /**
-   * Plucks the last type in a tuple of length 30 or less.
-   * Else returns the first type in a tuple.
-   */
-  export type AllOfDecoderReturn<T extends unknown[]> = T[SubtractOne<
-    T['length']
-  >] extends JsonDecoder.Decoder<infer R>
-    ? R
-    : T[0];
-
   /**
    * Tries to decode the provided json value with all of the provided `decoders`.
    * The order of the provided decoders matters: the output of one decoder is passed
@@ -359,10 +349,9 @@ export namespace JsonDecoder {
    *
    * @param decoders a spread of decoders to use.
    */
-  export function allOf<
-    T extends Array<Decoder<unknown>>,
-    R = AllOfDecoderReturn<T>
-  >(...decoders: T): Decoder<R> {
+  export function allOf<T extends Array<Decoder<unknown>>, R>(
+    ...decoders: [...T, Decoder<R>]
+  ): Decoder<R> {
     return new Decoder<R>((json: any) =>
       decoders.reduce(
         (prev, curr) =>
@@ -439,6 +428,51 @@ export namespace JsonDecoder {
   };
 
   /**
+   * Decoder for a tuple of a specific shape.
+   *
+   * @param decoders The decoders for each element of the tuple.
+   */
+  // This turns a tuple of decoders into a tuple of their results.
+  type TupleOfResults<T extends readonly [] | readonly Decoder<any>[]> = {
+    [K in keyof T]: T[K] extends Decoder<infer R> ? R : never;
+  };
+  export const tuple = <T extends readonly [] | readonly Decoder<any>[]>(
+    decoders: T,
+    decoderName: string
+  ): Decoder<TupleOfResults<T>> => {
+    return new Decoder<TupleOfResults<T>>(json => {
+      if (json instanceof Array) {
+        const arr = [];
+        if (json.length !== decoders.length) {
+          return err<TupleOfResults<T>>(
+            $JsonDecoderErrors.tupleLengthMismatchError(
+              decoderName,
+              json,
+              decoders
+            )
+          );
+        }
+        for (let i = 0; i < json.length; i++) {
+          const result = decoders[i].decode(json[i]);
+          if (result.isOk()) {
+            arr.push(result.value);
+          } else {
+            return err<TupleOfResults<T>>(
+              $JsonDecoderErrors.arrayError(decoderName, i, result.error)
+            );
+          }
+        }
+        // Cast to a tuple of the right type.
+        return ok<TupleOfResults<T>>(arr as unknown as TupleOfResults<T>);
+      } else {
+        return err<TupleOfResults<T>>(
+          $JsonDecoderErrors.primitiveError(json, 'array')
+        );
+      }
+    });
+  };
+
+  /**
    * Decoder that only succeeds when json is strictly (===) `null`.
    * When succeeds it returns `defaultValue`.
    *
@@ -494,6 +528,69 @@ export namespace JsonDecoder {
       }
     });
   }
+
+  /**
+   * Transforms union type to intersection type.
+   *
+   * For example:
+   *
+   *    Intersect<{ x: number } | { y: number }>
+   *
+   * becomes
+   *
+   *    { x: number } & { y: number }
+   */
+  type Intersect<T> = (T extends any ? (x: T) => void : never) extends (
+    x: infer R
+  ) => void
+    ? R
+    : never;
+
+  /**
+   * Transforms array of objects to a combined intersection type
+   *
+   * For example:
+   *
+   *    Combine<[{ x: number }, { y: number }]>
+   *
+   * becomes
+   *
+   *    { x: number } & { y: number }
+   */
+  type Combine<T extends { [k: string]: any }[]> = Intersect<T[number]>;
+
+  /**
+   * Combines a list of decoders into a single decoder
+   * which result is an intersection type of input decoders.
+   *
+   * Example:
+   *
+   *    > JsonDecoder.combine(Decoder<User>, Decoder<Metadata>)
+   *    // => Decoder<User & Metadata>
+   *
+   * @param decoders Variable arguments list of decoders
+   */
+  export function combine<TS extends { [k: string]: any }[]>(
+    ...decoders: { [T in keyof TS]: Decoder<TS[T]> }
+  ): Decoder<Combine<TS>> {
+    return new Decoder((json: any) => {
+      try {
+        const finalResult = decoders.reduce((acc, decoder) => {
+          const result = decoder.decode(json);
+          if (result.isOk()) {
+            return {
+              ...acc,
+              ...result.value
+            };
+          }
+          throw result.error;
+        }, {}) as Combine<TS>;
+        return ok(finalResult);
+      } catch (error) {
+        return err(error as string);
+      }
+    });
+  }
 }
 
 export namespace $JsonDecoderErrors {
@@ -520,6 +617,12 @@ export namespace $JsonDecoderErrors {
     `<${decoderName}> decoder failed because ${JSON.stringify(
       json
     )} can't be decoded with any of the provided oneOf decoders`;
+
+  export const enumValueError = (
+    decoderName: string,
+    invalidValue: any
+  ): string =>
+    `<${decoderName}> decoder failed at value "${invalidValue}" which is not in the enum`;
 
   export const objectError = (
     decoderName: string,
@@ -548,4 +651,12 @@ export namespace $JsonDecoderErrors {
     key: string
   ): string =>
     `Unknown key "${key}" found while processing strict <${decoderName}> decoder`;
+
+  export const tupleLengthMismatchError = (
+    decoderName: string,
+    jsonArray: readonly any[],
+    decoders: readonly any[]
+  ): string =>
+    `<${decoderName}> tuple decoder failed because it received a tuple of length ` +
+    `${jsonArray.length}, but ${decoders.length} decoders.`;
 }
